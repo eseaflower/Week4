@@ -4,10 +4,11 @@ import matplotlib.pyplot as plt
 import scipy.sparse as spsparse
 
 filename = r"../Data/sentences.txt"    
-size = 1e6
+size = 1e3
 pickledRawFilename = "{0}_{1}k.pkl".format(filename, size/1000)
 indexedDataFilename = "{0}_index.pkl".format(filename)
 csrDataFilename = "{0}_csr.pkl".format(filename)
+bucketFilename = "{0}_bucket.pkl".format(filename)
 
 def loadFile(filename, size, outname):
     result =[]
@@ -122,11 +123,95 @@ def loadSparse(filename):
 
 
 
-#pickleCSR()
-#D = loadCSR()
-#generateSparse(filename, csrDataFilename, 1e5)
-d = loadSparse(csrDataFilename)
 
-print(d.nnz)
-print(d.shape)
+def getWordHashes(wordArray):
+    return [hash(w) for w in wordArray[1:11]]
+
+
+def generateBucketCandidates(filename, size, prefixSize=10):
+    cnt = dict()
+    ids = set()
+    with open(filename, "r") as f:
+        count = 0
+        while count < size:
+            if (count % 1e5) == 0:
+                print("Processing {0}".format(count/1e5))
+            line = f.readline()
+            if not line:
+                break
+            words = line.rstrip().split(' ')
+                        
+            sLen = len(words)
+            # We now that at the sentences are at least length 10.
+            # Hash the tuple of all words except i for each i 0-9.
+            wordHashes = getWordHashes(words)
+            for i in range(prefixSize):
+                t = hash(tuple([wordHashes[l] for l in range(prefixSize) if l != i]))
+                e = cnt.get(t, False)
+                if e:
+                    ids.add(t)
+                else:
+                    cnt[t] = True
+            count += 1
+    return ids
+
+def storeBucketCandidates():
+    buckets = generateBucketCandidates(filename, size, prefixSize=10)
+    with open(bucketFilename, "wb") as f:
+        pickle.dump(buckets, f)        
+
+def loadBuckets():
+    #storeBucketCandidates()
+    with open(bucketFilename, "rb") as f:
+        return pickle.load(f)
+
+def indexSentence(terms, words):
+    result = []
+    for w in words[1:]:
+        idx = terms.setdefault(w, len(terms))
+        result.append(idx)
+    return result
+
+def count(filename, size, prefixSize=10):
+    buckets = generateBucketCandidates(filename, size, prefixSize)#loadBuckets()
+    print("Loaded buckets")
+    terms = dict()
+    result = dict()
+    with open(filename, "r") as f:
+        count = 0
+        while count < size:
+            if (count % 1e5) == 0:
+                print("Processing {0}".format(count/1e5))
+            line = f.readline()
+            if not line:
+                break
+            words = line.rstrip().split(' ')
+                        
+            sLen = len(words)
+            # We now that at the sentences are at least length 10.
+            # Hash the tuple of all words except i for each i 0-9.
+            wordHashes = getWordHashes(words)
+            indexedSentence = None
+            for i in range(prefixSize):
+                t = hash(tuple([wordHashes[l] for l in range(prefixSize) if l != i]))
+                if t in buckets:
+                    #print("found bucket")
+                    # We should do stuff for this bucket.
+                    if not indexedSentence:
+                        indexedSentence = indexSentence(terms, words)
+                    entry = result.get(t, None)
+                    if not entry:
+                        entry = []
+                        result[t] = entry
+                    entry.append({"i":int(words[0]), "s":words[1:]})
+            count += 1
+    
+    return result
+
+#Second pass
+#d = count(filename, size)
+#print(len(d))
+
+
+
 
