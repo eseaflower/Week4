@@ -1,13 +1,17 @@
+import os
 import pickle
+from time import time
 #import numpy as np
 #import matplotlib.pyplot as plt
 #import scipy.sparse as spsparse
 
 dirname = r"../Data/"
+partitionDir = r"{0}partitions/".format(dirname)
 inputFilename = r"sentences.txt"    
 termFilename = r"terms.pkl"
 lengthFile = r"lengths.pkl"
-defaultSize = 1e4
+partionDescFile = r"partition_desc.pkl"
+defaultSize = 1e7
 
 
 def save(fname, o):
@@ -20,8 +24,8 @@ def load(fname):
         return pickle.load(f)
 
 
-def forWords(fname, size, func):
-    filePath = dirname + fname
+def forWords(fname, size, func, baseDir = dirname):
+    filePath = baseDir + fname
     count  = 0
     with open(filePath, "r") as f:
         while count < size:
@@ -53,16 +57,21 @@ def loadTerms(fname):
 def indexSentence(s, terms):
     return [terms[w] for w in s]
 
-def leaveOneOut(words, terms):
-    indexes = indexSentence(words, terms)        
-    for i in range(len(words)):
-        yield [indexes[l] for l in range(len(words)) if l != i]    
+def leaveOneOut(indexes):            
+    for i in range(len(indexes)):
+        yield [indexes[l] for l in range(len(indexes)) if l != i]    
 
-def getHashes(words, terms):
-    subSentences = leaveOneOut(words, terms)
-    seenHashes = set()    
-            
-    for ss in subSentences:
+def getHashes(indexes, includeFullSet = True):
+    seenHashes = set()
+    # Hash the entire index set.
+    if includeFullSet:
+        sh = hash(tuple(indexes))
+        seenHashes.add(sh)
+        yield sh
+    
+    # Generate all subsequences with one item  left out.
+    subSet = leaveOneOut(indexes)                    
+    for ss in subSet:
         sh = hash(tuple(ss))
        # sh = sh % (2**31 + 1)
         # Only deliver unique hashes.
@@ -76,7 +85,8 @@ def createBuckets(fname, terms, size=defaultSize):
     multiHashes = dict()
     def func(words):
         id = int(words[0])
-        allHashes = getHashes(words, terms)        
+        indexes = indexSentence(words[1:], terms)
+        allHashes = getHashes(indexes)        
         for sh in allHashes:
             # Set the value in single hashes if it is not set.
             prevId = singleHashes.setdefault(sh, id)
@@ -110,13 +120,16 @@ def compWords(d1, d2, tol):
                 return False
     return True
 
-def compDocs(d1, d2):
+def compDocs(d1, d2, baseLen=-1):
     ld1 = len(d1)
     ld2 = len(d2)
     lenDiff = abs(ld1 - ld2)
     if lenDiff > 1:
         return False
     if lenDiff == 0:
+        if baseLen > 0 and ld1 != baseLen:
+            # Only count equal paris of baseLen
+            return False
         # Compare equal length accept 1 diff.
         return compWords(d1, d2, 1)
     
@@ -135,7 +148,7 @@ def compDocs(d1, d2):
     # Not within distance 1
     return False
 
-def dups(buckets, docs):
+def dups(buckets, docs, baseLen=-1):
     print("Starting dup count")
     cntP = 0
     cntN = 0
@@ -146,10 +159,27 @@ def dups(buckets, docs):
             for i in range(len(l)-1):
                 for j in range(i+1, len(l)):
                     yield (v[i], v[j])
-        for pair in p(v):
+        pg = p(v)
+        if baseLen > 0:
+            # Generate all pairs that should be compared.
+            # These include all sentences of base length
+            # and pairs (base, sub)
+            baseList = []
+            subList = []
+            for id in v:
+                if len(docs[id]) == baseLen:
+                    baseList.append(id)
+                subList.append(id)
+            def pp(b, s):
+                for i in range(len(b)):
+                    for j in range(i+1, len(s)):
+                        yield (b[i], s[j])                            
+            pg = pp(baseList, subList)
+
+        for pair in pg:
             if not pair in seenPairs:                
                 seenPairs.add(pair)
-                if compDocs(docs[pair[0]], docs[pair[1]]):
+                if compDocs(docs[pair[0]], docs[pair[1]], baseLen):
                     matches.add(pair)
                     cntP += 1
                 else:
@@ -172,7 +202,7 @@ def countFiles(fname, size=defaultSize):
 
 
 def getPartitionFilename(fname, partitionLength):
-    return "{0}{1}_part{2}.txt".format(dirname, fname, partitionLength)
+    return "{0}{1}_part{2}.txt".format(partitionDir, fname, partitionLength)
 
 def partitionFile(fname, size, partitionLength):
     sentences = []
@@ -190,35 +220,162 @@ def partitionFile(fname, size, partitionLength):
     return True
 
 def computePartitions(fname, size=defaultSize):
+    t1 = time()
+    if not os.path.exists(partitionDir):
+        os.makedirs(partitionDir)
+    
     lengths = dict()
-
+    partitionFiles = dict()     
     def f(words):
         l = len(words) - 1
         ul = lengths.setdefault(l, 0)
         lengths[l] = ul + 1
-        
-
+        entry = partitionFiles.get(l, None)
+        if not entry:
+            pFileName = getPartitionFilename(fname, l)
+            pFile = open(pFileName, "w")
+            entry = {"name":pFileName, "handle": pFile}
+            partitionFiles[l] = entry
+        handle = entry["handle"]
+        handle.write("{0}\n".format(" ".join(words)))
+                                        
     forWords(fname, size, f)
-    sortedLengths = sorted([l for l in lengths.keys()])    
-    save(lengthFile, sortedLengths)    
-
+    
+    
+    sortedLengths = sorted([l for l in partitionFiles.keys()])    
+    filenames = []
     for sl in sortedLengths:
-        partitionFile(fname, size, sl)                
+        entry = partitionFiles[sl]
+        entry["handle"].close()
+        filenames.append({"length":sl, "filename":entry["name"]})
+    
+    save(partionDescFile, filenames)
+    t2 = time()
+    print("Partitions created in {0} ms".format(t2-t1))
 
-computePartitions(inputFilename)
-lens = load(lengthFile)
+def loadPartition(fname, size=1e7):
+    result = []
+    def func(words):
+        result.append(words)
+    forWords(fname, size, func, r"./")
+    return result
 
-totCount = 0
-pMatches = set()
-for l in lens:
-    fname = getPartitionFilename(inputFilename, l)
-    pCount, matches = countFiles(fname)
-    pMatches.update(matches)
 
-aCount, aMatches = countFiles(inputFilename)
-print("Partition: {0}".format(len(pMatches)))
-print("Check: {0}".format(len(aMatches)))
+def concatPartitions(p1, p2):
+    for i in p1:
+        yield i
+    for i in p2:
+        yield i
 
+def createPartitionTerms(data):
+    terms = dict()
+    for words in data:
+        for w in words[1:]:
+            terms.setdefault(w, len(terms))    
+    return terms
+
+def getPartitionBuckets(data, terms, baseLen):    
+    singleHashes = dict()
+    multiHashes = dict()
+    for words in data:
+        id = int(words[0])
+        indexes = indexSentence(words[1:], terms)        
+        allHashes = getHashes(indexes, len(indexes) == baseLen)
+        for sh in allHashes:
+            # Set the value in single hashes if it is not set.
+            prevId = singleHashes.setdefault(sh, id)
+            # If this is the first time we see sh, 
+            # don't update multiHashes.            
+            if id != prevId:
+                # If this is the second time we see sh
+                # we create an entry in multiHashes
+                entry = multiHashes.setdefault(sh, [prevId])
+                entry.append(id)
+    return multiHashes
+
+
+def getCandidateDictionary(data, docs, terms):
+    result = dict()
+    for words in data:
+        id = int(words[0])
+        if id in docs:
+            result[id] = indexSentence(words[1:], terms)   
+    return result
+
+
+def countInPartitions(base, sub, baseLen):
+    terms = createPartitionTerms(concatPartitions(base, sub))
+    buckets = getPartitionBuckets(concatPartitions(base, sub), terms, baseLen)
+    print(len(buckets))
+    allDocuments = set()
+    for v in buckets.values():
+        allDocuments.update(v)
+    docs = getCandidateDictionary(concatPartitions(base, sub), allDocuments, terms)
+    cntP, cntN, matches = dups(buckets, docs, baseLen)    
+    print("P:{0} N:{1}".format(cntP, cntN))
+    return cntP, cntN, matches
+
+
+
+def bar():
+    lens = load(lengthFile)
+
+    totCount = 0
+    pMatches = set()
+    for l in lens:
+        fname = getPartitionFilename(inputFilename, l)
+        pCount, matches = countFiles(fname)
+        pMatches.update(matches)
+
+    aCount, aMatches = countFiles(inputFilename)
+    print("Partition: {0}".format(len(pMatches)))
+    print("Check: {0}".format(len(aMatches)))
+
+def partitioned():
+    #computePartitions(inputFilename, defaultSize)
+    partitions = load(partionDescFile)
+
+    loadedParitions = dict()
+    countP = 0
+    countN = 0
+    allMatces = set()    
+    for basePartition, subPartition in zip(partitions[:-1], partitions[1:]):            
+    
+        print("-- Doing base length {0}".format(basePartition["length"]))
+
+        p1 = loadedParitions.get(basePartition["length"], None)
+        if not p1 :
+            p1 = loadPartition(basePartition["filename"])
+            loadedParitions[basePartition["length"]] = p1
+        p2 = loadedParitions.get(subPartition["length"], None)
+        if not p2 :
+            p2 = loadPartition(subPartition["filename"])
+            loadedParitions[subPartition["length"]] = p2
+        # Do the stuff.
+        cntP, cntN, matches = countInPartitions(p1, p2, basePartition["length"])
+        #allMatces.update(matches)
+        countP += cntP
+        countN += cntN
+        # Remove base
+        loadedParitions[basePartition["length"]] = None
+
+    # Check the last partition
+    # Do the stuff.
+    cntP, cntN, matches = countInPartitions(loadedParitions[partitions[-1]["length"]], [], partitions[-1]["length"])
+    #allMatces.update(matches)
+    countP += cntP
+    countN += cntN
+    
+
+    print("Part: P{0} N:{1}, Unique: {2}".format(countP, countN, len(allMatces)))
+partitioned()
+#bar()
+#computePartitions(inputFilename, 1e7)
+
+
+
+# Count duplicates in the last partition.
+# !!!!!!!!!!     count(partitions[-1])
 
 # Up to len 59 use two lengths.
 # output all matching pairs, so we can
