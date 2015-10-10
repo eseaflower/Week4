@@ -11,7 +11,7 @@ inputFilename = r"sentences.txt"
 termFilename = r"terms.pkl"
 lengthFile = r"lengths.pkl"
 partionDescFile = r"partition_desc.pkl"
-defaultSize = 1e7
+defaultSize = 1e6
 
 
 def save(fname, o):
@@ -112,13 +112,21 @@ def loadDocs(fname, size, docs, terms):
     forWords(fname, size, func)
     return result
 
-def compWords(d1, d2, tol):
+def compWords(d1, d2, tol):    
     for w1, w2 in zip(d1, d2):
         if w1 != w2:
             tol -= 1
             if tol < 0:
                 return False
     return True
+
+def compWords2(d1, d2, tol):    
+    for w1, w2 in zip(d1, d2):
+        if w1 != w2:
+            tol -= 1
+            if tol < 0:
+                return tol
+    return tol
 
 def compDocs(d1, d2, baseLen=-1):
     ld1 = len(d1)
@@ -148,13 +156,45 @@ def compDocs(d1, d2, baseLen=-1):
     # Not within distance 1
     return False
 
+def compDocs2(d1, d2, baseLen=-1):
+    ld1 = len(d1)
+    ld2 = len(d2)
+    lenDiff = abs(ld1 - ld2)
+    if lenDiff > 1:
+        return -1
+    if lenDiff == 0:
+        if baseLen > 0 and ld1 != baseLen:
+            # Only count equal paris of baseLen
+            return -1
+        # Compare equal length accept 1 diff.
+        return compWords2(d1, d2, 1)
+    
+    large = d1
+    small = d2
+    if ld1 < ld2:
+        large = d2
+        small = d1
+    
+    for i in range(len(large)):
+        # Leave one out generator
+        loo = (large[j] for j in range(len(large)) if j != i)
+        if compWords2(small, loo, 0) >= 0:
+            return 0
+    
+    # Not within distance 1
+    return -1
+
 def dups(buckets, docs, baseLen=-1):
     print("Starting dup count")
     cntP = 0
     cntN = 0
-    seenPairs = set()
+    #seenPairs = set()
+    documentToMatches = dict()
+    documentDuplicates = dict()
+    duplicates = set()
     matches = set()
     for v in buckets.values():
+                
         def p(l):
             for i in range(len(l)-1):
                 for j in range(i+1, len(l)):
@@ -172,19 +212,45 @@ def dups(buckets, docs, baseLen=-1):
                 subList.append(id)
             def pp(b, s):
                 for i in range(len(b)):
-                    for j in range(i+1, len(s)):
-                        yield (b[i], s[j])                            
+                    if not b[i] in duplicates:
+                        for j in range(i+1, len(s)):
+                            if not s[j] in duplicates:
+                                yield (b[i], s[j])                            
             pg = pp(baseList, subList)
 
-        for pair in pg:
-            if not pair in seenPairs:                
-                seenPairs.add(pair)
-                if compDocs(docs[pair[0]], docs[pair[1]], baseLen):
-                    matches.add(pair)
-                    cntP += 1
-                else:
-                    cntN += 1
-    return cntP, cntN, matches
+        for pair in pg:                                                            
+            #if compDocs(docs[pair[0]], docs[pair[1]], baseLen):
+            cmp = compDocs2(docs[pair[0]], docs[pair[1]], baseLen)
+            if cmp == 1:
+                entry =  documentDuplicates.get(pair[0], 0)                
+                documentDuplicates[pair[0]] = entry +1
+                duplicates.add(pair[1])
+            elif cmp == 0:
+                entry = documentToMatches.setdefault(pair[0], set())
+                entry.add(pair[1])                    
+            else:
+                cntN += 1
+    
+
+    # Compute count based on matches and duplicates.
+    totalCount = 0
+    for k, v in documentToMatches.items():
+        otherDup = 0
+        for d in v:
+            if not d in duplicates:
+                otherDup += documentDuplicates.get(d, 0) + 1
+
+        myDup = documentDuplicates.get(k, 0) + 1
+        # All duplicates match len(v) documents as well.
+        totalCount += myDup*otherDup
+    
+    for k, v in documentDuplicates.items():
+        # Compute within group count.
+        myDup = v + 1
+        totalCount += myDup*(myDup-1) / 2
+
+
+    return totalCount, cntN, matches
 
 def countFiles(fname, size=defaultSize):
     #storeTerms(inputFilename, termFilename, defaultSize)
@@ -274,13 +340,28 @@ def createPartitionTerms(data):
             terms.setdefault(w, len(terms))    
     return terms
 
+def getHashes2(indexes, isBase):
+    sub = 1
+    if isBase:
+        sub = 0
+    hLen = int((len(indexes)-sub) / 2)
+    
+
+
+    h1 = hash(tuple(indexes[:hLen]))
+    yield h1
+    h2 = hash(tuple(indexes[-hLen:]))
+    if h1 != h2:
+        yield h2
+
 def getPartitionBuckets(data, terms, baseLen):    
     singleHashes = dict()
     multiHashes = dict()
     for words in data:
         id = int(words[0])
         indexes = indexSentence(words[1:], terms)        
-        allHashes = getHashes(indexes, len(indexes) == baseLen)
+        #allHashes = getHashes(indexes, len(indexes) == baseLen)
+        allHashes = getHashes2(indexes, len(indexes) == baseLen)
         for sh in allHashes:
             # Set the value in single hashes if it is not set.
             prevId = singleHashes.setdefault(sh, id)
@@ -368,7 +449,10 @@ def partitioned():
     
 
     print("Part: P{0} N:{1}, Unique: {2}".format(countP, countN, len(allMatces)))
+t1 = time()
 partitioned()
+t2 = time()
+print("Total time: {0}".format(t2-t1))
 #bar()
 #computePartitions(inputFilename, 1e7)
 
